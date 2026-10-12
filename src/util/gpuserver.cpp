@@ -24,6 +24,10 @@ void intHandler(int) {
 int gpuserver(int argc, const char **argv, const Command& command) {
     Parameters& par = Parameters::getInstance();
     par.parseParameters(argc, argv, command, true, 0, 0);
+    if (par.prefMode == Parameters::PREF_MODE_UNGAPPED_AND_GAPPED) {
+        Debug(Debug::ERROR) << "gpuserver --prefilter-mode 3 is disabled (SW kernels are not bias-corrected); restart without it (use 1)\n";
+        EXIT(EXIT_FAILURE);
+    }
 #ifdef HAVE_CUDA
     bool touch = (par.preloadMode != Parameters::PRELOAD_MODE_MMAP);
     IndexReader dbrIdx(par.db1, par.threads, IndexReader::SEQUENCES, (touch) ? (IndexReader::PRELOAD_INDEX | IndexReader::PRELOAD_DATA) : 0 );

@@ -34,6 +34,7 @@ set(TESTS
         TestKsw2.cpp
         TestBestAlphabet.cpp
         TestUngappedCpuPerf.cpp
+        TestProfileCalib.cpp
         )
 
 

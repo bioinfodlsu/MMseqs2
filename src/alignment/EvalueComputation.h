@@ -6,6 +6,8 @@
 #include "Util.h"
 #include "sls_alignment_evaluer.hpp"
 
+#include <cmath>
+
 class EvalueComputation {
 public:
     EvalueComputation(size_t dbResCount, BaseMatrix *subMat) : dbResCount(dbResCount) {
@@ -37,6 +39,45 @@ public:
         const double epa = evaluer.evaluePerArea( score );
         const double a = area( score, seqLength );
         return epa * a;
+    }
+
+    // Per-pair (query length, target length) p-value for ungapped scores.
+    // Uses finite-size-corrected area(m, n) instead of the DB-wide search
+    // space, so the result is independent of database size. The SLS calc()
+    // throws on non-positive lengths, so empty entries return p = 1.0 (the
+    // gate then rejects them unless they are identity hits).
+    inline double computePvalue(double score, double queryLength, double targetLength) const {
+        if (queryLength <= 0.0 || targetLength <= 0.0) {
+            return 1.0;
+        }
+        double pvalue = 1.0;
+        double evalue = 0.0;
+        evaluer.calc(score, queryLength, targetLength, pvalue, evalue);
+        return pvalue;
+    }
+
+    // Per-pair p-value from a per-profile calibration (see ProfileCalibrator).
+    // Used for profile queries, where single-matrix Karlin-Altschul statistics
+    // do not apply. Returns 1.0 on non-positive/invalid inputs. Callers treat
+    // a degenerate profile (no statistics exist) as fail-open by skipping
+    // this call and keeping the pair, and abort on an internal fit failure.
+    static inline double computeProfilePvalue(double score, int queryLength,
+                                              int targetLength,
+                                              double lambda, double K) {
+        if (lambda <= 0.0 || K <= 0.0 || score <= 0.0
+                || queryLength <= 0 || targetLength <= 0) {
+            return 1.0;
+        }
+        const double evalue = K * (double)queryLength * (double)targetLength
+                * std::exp(-lambda * score);
+        if (!std::isfinite(evalue) || evalue < 0.0) {
+            return 1.0;
+        }
+        const double pvalue = -std::expm1(-evalue);
+        if (!std::isfinite(pvalue) || pvalue < 0.0) {
+            return 1.0;
+        }
+        return (pvalue > 1.0) ? 1.0 : pvalue;
     }
 
     inline double computeLogEvalue(double score, double seqLength) {

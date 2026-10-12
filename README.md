@@ -136,6 +136,21 @@ MMseqs2 provides many additional search modes:
 
 Many modes can also be combined. You can, for example, do a translated nucleotide against protein profile search.
 
+### P-value ungapped prefilter support
+> **Disclaimer.** AI tools were used to implement the feature and write tests.
+> All changes have been manually reviewed and tested.
+> **Status: experimental.**
+
+Gates prefilter pairs on a per-pair ungapped p-value. New expert flags:
+
+| flag | type | default | meaning |
+| --- | --- | --- | --- |
+| `--ungapped-pvalue` | double | `1.0` | keep pairs with ungapped `p <=` value; `1.0` disables the gate |
+| `--ungapped-calib` | string | `""` | TSV sidecar cache for per-profile `(lambda,K)`; `""` = in-memory only |
+| `--ungapped-recalibrate` | bool | `false` | ignore cache and recompute every profile |
+
+Details, limitations and testing: [ungapped-prefilter.md](ungapped-prefilter.md).
+
 ### Memory requirements
 MMseqs2 minimum memory requirements for `cluster` or `linclust` is 1 byte per sequence residue, `search` needs 1 byte per target residue. Sequence databases can be compressed using the `--compress` flag, DNA sequences can be reduced by a factor of `~3.5` and proteins by `~1.7`.
    

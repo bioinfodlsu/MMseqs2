@@ -1959,7 +1959,15 @@ namespace cudasw4{
                 }
             }();
 
-            if(int8IsAllowed){
+            // Only the UInt8x4 gapless kernel subtracts currentInt8SubstitutionScoreBias per
+            // cell. Half2/Short2 gapless kernels and pure SW (SW_Endpos) scans consume the PSSM
+            // as-is, so the |min|-shift is applied only when the selected gapless config is
+            // UInt8x4. (GaplessPlusSW_Endpos reuses the shifted PSSM for its SW stage; that mode
+            // is disabled via --prefilter-mode 3.)
+            const bool needsInt8BiasShift = int8IsAllowed
+                && scanType != ScanType::SW_Endpos
+                && gaplessKernelConfig.datatype == GaplessKernelConfig::Datatype::UInt8x4;
+            if(needsInt8BiasShift){
                 currentInt8SubstitutionScoreBias = std::abs(std::min(0, hostFullQueryPSSM.getMinElement()));
 
                 for(int r = 0; r < 21; r++){
@@ -1967,6 +1975,8 @@ namespace cudasw4{
                         hostFullQueryPSSM[r][c] = hostFullQueryPSSM[r][c] + currentInt8SubstitutionScoreBias;
                     }
                 }
+            }else{
+                currentInt8SubstitutionScoreBias = 0;
             }
 
             // std::cout << "hostFullQueryPSSM\n";

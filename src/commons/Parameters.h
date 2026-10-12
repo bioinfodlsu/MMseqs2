@@ -438,6 +438,9 @@ public:
     int    maskNrepeats;                 // mask letters that occur at least N times in a row
 
     int    minDiagScoreThr;              // min diagonal score
+    double ungappedPvalThr;              // max per-pair ungapped p-value
+    std::string ungappedCalibPath;       // sidecar cache for per-profile ungapped calibration ("" = in-memory only)
+    bool   ungappedRecalibrate;          // ignore cache entries and recalibrate
     int    spacedKmer;                   // Spaced Kmers
     int    split;                        // Split database in n equal chunks
     int    splitMode;                    // Split by query or target DB
@@ -825,6 +828,9 @@ public:
     PARAMETER(PARAM_MASK_N_REPEAT)
 
     PARAMETER(PARAM_MIN_DIAG_SCORE)
+    PARAMETER(PARAM_UNGAPPED_PVAL)
+    PARAMETER(PARAM_UNGAPPED_CALIB)
+    PARAMETER(PARAM_UNGAPPED_RECALIBRATE)
     PARAMETER(PARAM_K_SCORE)
     PARAMETER(PARAM_MAX_SEQS)
     PARAMETER(PARAM_SPLIT)

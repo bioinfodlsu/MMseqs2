@@ -529,6 +529,14 @@ namespace cudasw4{
         cudaDeviceGetAttribute(&ccMajor, cudaDevAttrComputeCapabilityMajor, deviceId);
         cudaDeviceGetAttribute(&ccMinor, cudaDevAttrComputeCapabilityMinor, deviceId);
 
+#ifdef MARV_FORCE_GAPLESS_CC_MAJOR
+        // Test-only: select another architecture's gapless config set on the
+        // current device. Set via -DMARV_FORCE_GAPLESS_CC_MAJOR=<major>
+        // (-DMARV_FORCE_GAPLESS_CC_MINOR=<minor>, default 0).
+        ccMajor = MARV_FORCE_GAPLESS_CC_MAJOR;
+        ccMinor = MARV_FORCE_GAPLESS_CC_MINOR;
+#endif
+
         std::vector<GaplessKernelConfig> configs;
 
     #if defined(__CUDACC__)

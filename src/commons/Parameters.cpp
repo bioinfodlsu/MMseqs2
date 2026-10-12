@@ -50,6 +50,9 @@ Parameters::Parameters():
         PARAM_MASK_LOWER_CASE(PARAM_MASK_LOWER_CASE_ID, "--mask-lower-case", "Mask lower case residues", "Lowercase letters will be excluded from k-mer search 0: include region, 1: exclude region", typeid(int), (void *) &maskLowerCaseMode, "^[0-1]{1}", MMseqsParameter::COMMAND_PREFILTER | MMseqsParameter::COMMAND_EXPERT),
         PARAM_MASK_N_REPEAT(PARAM_MASK_N_REPEAT_ID, "--mask-n-repeat", "Mask lower letter repeating N times", "Repeat letters that occur > threshold in a rwo", typeid(int), (void *) &maskNrepeats, "^[0-9]{1}[0-9]*$", MMseqsParameter::COMMAND_PREFILTER | MMseqsParameter::COMMAND_EXPERT),
         PARAM_MIN_DIAG_SCORE(PARAM_MIN_DIAG_SCORE_ID, "--min-ungapped-score", "Minimum diagonal score", "Accept only matches with ungapped alignment score above threshold", typeid(int), (void *) &minDiagScoreThr, "^[0-9]{1}[0-9]*$", MMseqsParameter::COMMAND_PREFILTER | MMseqsParameter::COMMAND_EXPERT),
+        PARAM_UNGAPPED_PVAL(PARAM_UNGAPPED_PVAL_ID, "--ungapped-pvalue", "Maximum ungapped p-value", "Accept only matches with per-pair ungapped p-value below threshold (1.0 to disable)", typeid(double), (void *) &ungappedPvalThr, "^(0(\\.[0-9]+)?|1(\\.0+)?)$", MMseqsParameter::COMMAND_PREFILTER | MMseqsParameter::COMMAND_EXPERT),
+        PARAM_UNGAPPED_CALIB(PARAM_UNGAPPED_CALIB_ID, "--ungapped-calib", "Profile calibration cache", "Path to sidecar cache for per-profile ungapped calibration (empty = in-memory only)", typeid(std::string), (void *) &ungappedCalibPath, "", MMseqsParameter::COMMAND_PREFILTER | MMseqsParameter::COMMAND_EXPERT),
+        PARAM_UNGAPPED_RECALIBRATE(PARAM_UNGAPPED_RECALIBRATE_ID, "--ungapped-recalibrate", "Recalibrate profiles", "Ignore cache entries and recalibrate every profile", typeid(bool), (void *) &ungappedRecalibrate, "", MMseqsParameter::COMMAND_PREFILTER | MMseqsParameter::COMMAND_EXPERT),
         PARAM_K_SCORE(PARAM_K_SCORE_ID, "--k-score", "k-score", "k-mer threshold for generating similar k-mer lists", typeid(MultiParam<SeqProf<int>>), (void *) &kmerScore, "^[0-9]{1}[0-9]*$", MMseqsParameter::COMMAND_PREFILTER | MMseqsParameter::COMMAND_EXPERT),
         PARAM_MAX_SEQS(PARAM_MAX_SEQS_ID, "--max-seqs", "Max results per query", "Maximum results per query sequence allowed to pass the prefilter (affects sensitivity)", typeid(size_t), (void *) &maxResListLen, "^[1-9]{1}[0-9]*$", MMseqsParameter::COMMAND_PREFILTER),
         PARAM_SPLIT(PARAM_SPLIT_ID, "--split", "Split database", "Split input into N equally distributed chunks. 0: set the best split automatically", typeid(int), (void *) &split, "^[0-9]{1}[0-9]*$", MMseqsParameter::COMMAND_PREFILTER | MMseqsParameter::COMMAND_EXPERT),
@@ -183,7 +186,7 @@ Parameters::Parameters():
         PARAM_NUM_ITERATIONS(PARAM_NUM_ITERATIONS_ID, "--num-iterations", "Search iterations", "Number of iterative profile search iterations", typeid(int), (void *) &numIterations, "^[1-9]{1}[0-9]*$", MMseqsParameter::COMMAND_PROFILE),
         PARAM_START_SENS(PARAM_START_SENS_ID, "--start-sens", "Start sensitivity", "Start sensitivity", typeid(float), (void *) &startSens, "^[0-9]*(\\.[0-9]+)?$"),
         PARAM_SENS_STEPS(PARAM_SENS_STEPS_ID, "--sens-steps", "Search steps", "Number of search steps performed from --start-sens to -s", typeid(int), (void *) &sensSteps, "^[1-9]{1}$"),
-        PARAM_PREF_MODE(PARAM_PREF_MODE_ID,"--prefilter-mode", "Prefilter mode", "prefilter mode: 0: kmer/ungapped 1: ungapped, 2: nofilter, 3: ungapped&gapped",typeid(int), (void *) &prefMode, "^[0-3]{1}$"),
+        PARAM_PREF_MODE(PARAM_PREF_MODE_ID,"--prefilter-mode", "Prefilter mode", "prefilter mode: 0: kmer/ungapped 1: ungapped, 2: nofilter, 3: ungapped&gapped (disabled)",typeid(int), (void *) &prefMode, "^[0-3]{1}$"),
         PARAM_EXHAUSTIVE_SEARCH(PARAM_EXHAUSTIVE_SEARCH_ID, "--exhaustive-search", "Exhaustive search mode", "For bigger profile DB, run iteratively the search by greedily swapping the search results", typeid(bool), (void *) &exhaustiveSearch, "", MMseqsParameter::COMMAND_PROFILE | MMseqsParameter::COMMAND_EXPERT),
         PARAM_EXHAUSTIVE_SEARCH_FILTER(PARAM_EXHAUSTIVE_SEARCH_FILTER_ID, "--exhaustive-search-filter", "Filter results during exhaustive search", "Filter result during search: 0: do not filter, 1: filter", typeid(int), (void *) &exhaustiveFilterMsa, "^[0-1]{1}$", MMseqsParameter::COMMAND_ALIGN | MMseqsParameter::COMMAND_EXPERT),
 
@@ -512,6 +515,9 @@ Parameters::Parameters():
     ungappedprefilter.push_back(&PARAM_NO_COMP_BIAS_CORR);
     ungappedprefilter.push_back(&PARAM_NO_COMP_BIAS_CORR_SCALE);
     ungappedprefilter.push_back(&PARAM_MIN_DIAG_SCORE);
+    ungappedprefilter.push_back(&PARAM_UNGAPPED_PVAL);
+    ungappedprefilter.push_back(&PARAM_UNGAPPED_CALIB);
+    ungappedprefilter.push_back(&PARAM_UNGAPPED_RECALIBRATE);
     ungappedprefilter.push_back(&PARAM_MASK_N_REPEAT);
     ungappedprefilter.push_back(&PARAM_MAX_SEQS);
     ungappedprefilter.push_back(&PARAM_TAXON_LIST);
@@ -2558,6 +2564,9 @@ void Parameters::setDefaults() {
     maskLowerCaseMode = 0;
     maskNrepeats = 0;
     minDiagScoreThr = 15;
+    ungappedPvalThr = 1.0;
+    ungappedCalibPath = "";
+    ungappedRecalibrate = false;
     spacedKmer = true;
     includeIdentity = false;
     alignmentMode = ALIGNMENT_MODE_FAST_AUTO;

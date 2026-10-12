@@ -19,6 +19,25 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 set(LIBRARY_ONLY 0 CACHE BOOL "Do not build executables")
 
+# Test-only overrides: build a binary that selects a different architecture's
+# gapless config set on the current device. Empty (default) = native device.
+# MARV_FORCE_INT8 optionally forces int8 on/off independently of the arch.
+set(MARV_FORCE_GAPLESS_CC_MAJOR "" CACHE STRING "Force gapless config arch major for testing (empty = native)")
+set(MARV_FORCE_GAPLESS_CC_MINOR "" CACHE STRING "Force gapless config arch minor for testing (default 0)")
+set(MARV_FORCE_INT8 "" CACHE STRING "Force int8 gapless on/off for testing (empty = arch-derived)")
+set(MARV_FORCE_DEFINITIONS "")
+if(MARV_FORCE_GAPLESS_CC_MAJOR)
+    list(APPEND MARV_FORCE_DEFINITIONS "MARV_FORCE_GAPLESS_CC_MAJOR=${MARV_FORCE_GAPLESS_CC_MAJOR}")
+    if(MARV_FORCE_GAPLESS_CC_MINOR)
+        list(APPEND MARV_FORCE_DEFINITIONS "MARV_FORCE_GAPLESS_CC_MINOR=${MARV_FORCE_GAPLESS_CC_MINOR}")
+    else()
+        list(APPEND MARV_FORCE_DEFINITIONS "MARV_FORCE_GAPLESS_CC_MINOR=0")
+    endif()
+endif()
+if(NOT MARV_FORCE_INT8 STREQUAL "")
+    list(APPEND MARV_FORCE_DEFINITIONS "MARV_FORCE_INT8=${MARV_FORCE_INT8}")
+endif()
+
 set(NVCC_FLAGS)
 list(APPEND NVCC_FLAGS --extended-lambda)
 list(APPEND NVCC_FLAGS --expt-relaxed-constexpr)
@@ -110,7 +129,7 @@ endfunction()
 add_library(marv ${ALIGN_SOURCES} marv.cu marv.h ${INT8_GAPLESS_OBJECTS})
 set_source_files_properties(${MARV_GPU_SOURCES} PROPERTIES LANGUAGE ${MARV_GPU_LANGUAGE})
 configure_marv_gpu_target(marv)
-target_compile_definitions(marv PRIVATE ${INT8_GAPLESS_DEFINITION})
+target_compile_definitions(marv PRIVATE ${INT8_GAPLESS_DEFINITION} ${MARV_FORCE_DEFINITIONS})
 
 if(ENABLE_HIP)
     set_target_properties(marv PROPERTIES
@@ -129,7 +148,7 @@ if(NOT LIBRARY_ONLY)
     add_executable(align ${ALIGN_SOURCES} main.cu options.cpp sequence_io.cpp ${INT8_GAPLESS_OBJECTS})
     set_source_files_properties(${MARV_GPU_SOURCES} PROPERTIES LANGUAGE ${MARV_GPU_LANGUAGE})
     configure_marv_gpu_target(align)
-    target_compile_definitions(align PRIVATE ${INT8_GAPLESS_DEFINITION})
+    target_compile_definitions(align PRIVATE ${INT8_GAPLESS_DEFINITION} ${MARV_FORCE_DEFINITIONS})
     if(NOT ENABLE_HIP)
         target_compile_options(align PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=-fopenmp>)
     endif()

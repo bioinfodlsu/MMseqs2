@@ -57,6 +57,10 @@ int doeasysearch(int argc, const char **argv, const Command &command, bool linse
     setEasySearchDefaults(&par, linsearch);
     par.parseParameters(argc, argv, command, true, Parameters::PARSE_VARIADIC, 0);
     setEasySearchMustPassAlong(&par, linsearch);
+    if (par.prefMode == Parameters::PREF_MODE_UNGAPPED_AND_GAPPED) {
+        Debug(Debug::ERROR) << "--prefilter-mode 3 (UNGAPPED_AND_GAPPED) is disabled (SW kernels are not bias-corrected); use --prefilter-mode 1 (ungapped) or 0 (k-mer)\n";
+        EXIT(EXIT_FAILURE);
+    }
 
     bool needBacktrace = false;
     bool needTaxonomy = false;

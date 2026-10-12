@@ -16,11 +16,14 @@
 #include "IndexReader.h"
 #include "QueryMatcherTaxonomyHook.h"
 #include "Masker.h"
+#include "ProfileCalibrator.h"
 
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <chrono>
 #include <thread>
+#include <map>
+#include <vector>
 
 #ifdef OPENMP
 #include <omp.h>
@@ -42,6 +45,7 @@ void intHandlerClient(int) {
 void runFilterOnGpu(Parameters & par, BaseMatrix * subMat,
                     DBReader<DBKeyType> * qdbr, DBReader<DBKeyType> * tdbr,
                     bool sameDB, DBWriter & resultWriter, EvalueComputation * evaluer,
+                    EvalueComputation * evaluerUngapped,
                     QueryMatcherTaxonomyHook *taxonomyHook){
     Debug::Progress progress(qdbr->getSize());
     const int querySeqType = qdbr->getDbtype();
@@ -170,6 +174,20 @@ void runFilterOnGpu(Parameters & par, BaseMatrix * subMat,
     }
 
     // marv.prefetch();
+    // Per-profile ungapped calibration (profile queries only): single-matrix
+    // Karlin-Altschul statistics do not apply to PSSM scores. Each profile
+    // gets an analytic (lambda, K) from its aggregate score distribution via
+    // the vendored NCBI routines (see ProfileCalibrator/NcbiKarlin.h) --
+    // millisecond-scale and deterministic, cached on disk across runs.
+    // Sequence queries keep the BLOSUM gapless SLS path in the hit loop below.
+    const bool isProfileQueryDb = Parameters::isEqualDbtype(querySeqType, Parameters::DBTYPE_HMM_PROFILE);
+    const bool useProfileCalib = isProfileQueryDb && par.ungappedPvalThr < 1.0;
+    std::map<uint64_t, ProfileCalibrator::Calib> calibCache;
+    if (useProfileCalib && par.ungappedCalibPath.empty() == false
+            && par.ungappedRecalibrate == false) {
+        ProfileCalibrator::loadCache(par.ungappedCalibPath, calibCache);
+    }
+    bool calibCacheDirty = false;
     for (size_t id = 0; id < qdbr->getSize(); id++) {
         if (!keepRunningClient) {
             break;
@@ -200,6 +218,35 @@ void runFilterOnGpu(Parameters & par, BaseMatrix * subMat,
                         bias = static_cast<short>((compositionBias[i] < 0.0) ? (compositionBias[i] - 0.5) : (compositionBias[i] + 0.5));
                     }
                     profile[j * qSeq.L  + i] = subMat->subMatrix[j][qSeq.numSequence[i]] + bias;
+                }
+            }
+        }
+        // Per-profile calibration lookup (miss -> analytic NCBI fit + cache).
+        ProfileCalibrator::Calib queryCalib;
+        bool haveQueryCalib = false;
+        if (useProfileCalib) {
+            if (qSeq.L <= 0 || profile == NULL) {
+                // Empty profile entry: no statistics exist (fail-open).
+                // calibrate() logs and classifies the invalid input.
+                queryCalib = ProfileCalibrator::calibrate(profile, qSeq.L,
+                        subMat->alphabetSize, subMat->pBack);
+            } else {
+                const uint64_t profHash = ProfileCalibrator::hashProfile(
+                        profile, qSeq.L, subMat->alphabetSize);
+                std::map<uint64_t, ProfileCalibrator::Calib>::const_iterator found =
+                        calibCache.find(profHash);
+                if (found != calibCache.end() && found->second.ok
+                        && found->second.queryLen == qSeq.L) {
+                    queryCalib = found->second;
+                    haveQueryCalib = true;
+                } else {
+                    queryCalib = ProfileCalibrator::calibrate(profile, qSeq.L,
+                            subMat->alphabetSize, subMat->pBack);
+                    if (queryCalib.ok) {
+                        calibCache[profHash] = queryCalib;
+                        calibCacheDirty = true;
+                        haveQueryCalib = true;
+                    }
                 }
             }
         }
@@ -276,10 +323,35 @@ void runFilterOnGpu(Parameters & par, BaseMatrix * subMat,
             // }
             // bool hasEvalue = (evalue <= par.evalThr);
             bool hasDiagScore = (score > par.minDiagScoreThr);
+            // Per-pair ungapped p-value filter (--ungapped-pvalue).
+            // Profile queries use the per-profile fitted (lambda, K);
+            // sequence queries use BLOSUM gapless SLS statistics.
+            // A profile whose calibration is degenerate (no Karlin-Altschul
+            // statistics exist) fails open; an internal calibration failure
+            // aborts, since it should never happen for valid input.
+            bool hasPvalue = true;
+            if (par.ungappedPvalThr < 1.0 && evaluerUngapped != NULL) {
+                if (haveQueryCalib) {
+                    const size_t targetLen = tdbr->getSeqLen(results[i].id);
+                    hasPvalue = (EvalueComputation::computeProfilePvalue(score,
+                            qSeq.L, (int)targetLen,
+                            queryCalib.lambda, queryCalib.K) <= par.ungappedPvalThr);
+                } else if (isProfileQueryDb) {
+                    if (queryCalib.degenerate == false) {
+                        Debug(Debug::ERROR) << "Profile calibration failed unexpectedly for query "
+                                            << queryKey << " (not a degenerate profile); aborting.\n";
+                        EXIT(EXIT_FAILURE);
+                    }
+                    // degenerate: keep the pair (fail-open)
+                } else {
+                    const size_t targetLen = tdbr->getSeqLen(results[i].id);
+                    hasPvalue = (evaluerUngapped->computePvalue(score, qSeq.L, targetLen) <= par.ungappedPvalThr);
+                }
+            }
 
             const bool isIdentity = (queryKey == targetKey && (par.includeIdentity || sameDB))? true : false;
             // --filter-hits
-            if (isIdentity || hasDiagScore) {
+            if (isIdentity || (hasDiagScore && hasPvalue)) {
                 if(par.prefMode == Parameters::PREF_MODE_UNGAPPED_AND_GAPPED){
                     Matcher::result_t res;
                     res.dbKey = targetKey;
@@ -335,6 +407,13 @@ void runFilterOnGpu(Parameters & par, BaseMatrix * subMat,
         GPUSharedMemory::unmap(layout);
     }
 
+    if (calibCacheDirty && par.ungappedCalibPath.empty() == false) {
+        if (ProfileCalibrator::saveCache(par.ungappedCalibPath, calibCache) == false) {
+            Debug(Debug::WARNING) << "Could not write profile calibration cache to "
+                                  << par.ungappedCalibPath << "\n";
+        }
+    }
+
     if (compositionBias != NULL) {
         free(compositionBias);
     }
@@ -376,6 +455,7 @@ static int scoreAuxOnDiagonal(const unsigned char *qAux, int qLen,
 void runFilterOnCpu(Parameters & par, BaseMatrix * subMat, BaseMatrix * subMatAux, int8_t * tinySubMat,
                     DBReader<DBKeyType> * qdbr, DBReader<DBKeyType> * tdbr,
                     SequenceLookup * sequenceLookup, bool sameDB, DBWriter & resultWriter, EvalueComputation * evaluer,
+                    EvalueComputation * evaluerUngapped,
                     QueryMatcherTaxonomyHook *taxonomyHook, int alignmentMode){
     std::vector<hit_t> shortResults;
     shortResults.reserve(tdbr->getSize()/2);
@@ -405,6 +485,59 @@ void runFilterOnCpu(Parameters & par, BaseMatrix * subMat, BaseMatrix * subMatAu
     const unsigned char auxMaskNum = (subMatAux != NULL)
             ? (unsigned char)subMatAux->aa2num[(int)'X'] : 0;
     size_t rescoreCount = 0;
+    // Per-profile ungapped calibration (profile queries only), mirroring the
+    // GPU path: single-matrix Karlin-Altschul statistics do not apply to PSSM
+    // scores. Pre-calibrate serially before the parallel target loop so the
+    // per-query (lambda, K) lookup below is read-only and thread-safe.
+    // Sequence queries keep the BLOSUM gapless SLS path in the hit loop below.
+    const bool isProfileQueryDb = Parameters::isEqualDbtype(querySeqType, Parameters::DBTYPE_HMM_PROFILE);
+    const bool useProfileCalib = isProfileQueryDb && (alignmentMode == 0) && (par.ungappedPvalThr < 1.0);
+    std::map<uint64_t, ProfileCalibrator::Calib> calibCache;
+    std::vector<ProfileCalibrator::Calib> queryCalibs(qdbr->getSize());
+    std::vector<char> haveQueryCalib(qdbr->getSize(), 0);
+    bool calibCacheDirty = false;
+    if (useProfileCalib && par.ungappedCalibPath.empty() == false
+            && par.ungappedRecalibrate == false) {
+        ProfileCalibrator::loadCache(par.ungappedCalibPath, calibCache);
+    }
+    if (useProfileCalib) {
+        Sequence tmpQ(par.maxSeqLen, querySeqType, subMat, 0, false, par.compBiasCorrection);
+        for (size_t qId = 0; qId < qdbr->getSize(); qId++) {
+            DBKeyType tmpKey = qdbr->getDbKey(qId);
+            char *tmpData = qdbr->getData(qId, 0);
+            unsigned int tmpLen = qdbr->getSeqLen(qId);
+            tmpQ.mapSequence(qId, tmpKey, tmpData, tmpLen);
+            if (tmpQ.L <= 0 || tmpQ.profile_for_alignment == NULL) {
+                // Empty profile entry: no statistics exist (fail-open).
+                // calibrate() logs and classifies the invalid input.
+                queryCalibs[qId] = ProfileCalibrator::calibrate(
+                        tmpQ.profile_for_alignment, tmpQ.L,
+                        subMat->alphabetSize, subMat->pBack);
+                continue;
+            }
+            const uint64_t profHash = ProfileCalibrator::hashProfile(
+                    tmpQ.profile_for_alignment, tmpQ.L, subMat->alphabetSize);
+            std::map<uint64_t, ProfileCalibrator::Calib>::const_iterator found =
+                    calibCache.find(profHash);
+            if (found != calibCache.end() && found->second.ok
+                    && found->second.queryLen == tmpQ.L) {
+                queryCalibs[qId] = found->second;
+                haveQueryCalib[qId] = 1;
+            } else {
+                ProfileCalibrator::Calib cal = ProfileCalibrator::calibrate(
+                        tmpQ.profile_for_alignment, tmpQ.L,
+                        subMat->alphabetSize, subMat->pBack);
+                // Store the status even when !ok so the parallel gate below
+                // can distinguish degenerate (fail-open) from internal.
+                queryCalibs[qId] = cal;
+                if (cal.ok) {
+                    calibCache[profHash] = cal;
+                    haveQueryCalib[qId] = 1;
+                    calibCacheDirty = true;
+                }
+            }
+        }
+    }
 #ifdef OPENMP
     omp_set_nested(1);
 #endif
@@ -536,7 +669,31 @@ void runFilterOnCpu(Parameters & par, BaseMatrix * subMat, BaseMatrix * subMatAu
                 // therefore only uses a >0 floor and the real threshold is applied after the
                 // rescore; the floor keeps the candidate set bounded to targets with some primary signal.
                 bool hasDiagScore = useAux ? (score > 0) : (score > par.minDiagScoreThr);
-                if (isIdentity || (hasDiagScore && hasEvalue)) {
+                // Per-pair ungapped p-value on the primary score. Skipped when the
+                // aux channel is on (deferred to the combined score below) and when
+                // running as gappedprefilter (alignmentMode != 0, gapped stats apply).
+                // Profile queries use the per-profile fitted (lambda, K);
+                // sequence queries use BLOSUM gapless SLS statistics.
+                // A degenerate profile calibration fails open (keep the pair);
+                // an internal failure aborts.
+                bool hasPvalue = true;
+                if (alignmentMode == 0 && useAux == false && evaluerUngapped != NULL && par.ungappedPvalThr < 1.0) {
+                    if (haveQueryCalib[id]) {
+                        hasPvalue = (EvalueComputation::computeProfilePvalue(score,
+                                qSeq.L, (int)tSeq.L,
+                                queryCalibs[id].lambda, queryCalibs[id].K) <= par.ungappedPvalThr);
+                    } else if (isProfileQueryDb) {
+                        if (queryCalibs[id].degenerate == false) {
+                            Debug(Debug::ERROR) << "Profile calibration failed unexpectedly for query "
+                                                << queryKey << " (not a degenerate profile); aborting.\n";
+                            EXIT(EXIT_FAILURE);
+                        }
+                        // degenerate: keep the pair (fail-open)
+                    } else {
+                        hasPvalue = (evaluerUngapped->computePvalue(score, qSeq.L, tSeq.L) <= par.ungappedPvalThr);
+                    }
+                }
+                if (isIdentity || (hasDiagScore && hasEvalue && hasPvalue)) {
                     hit_t hit;
                     hit.seqId = targetKey;
                     hit.prefScore = score;
@@ -588,10 +745,33 @@ void runFilterOnCpu(Parameters & par, BaseMatrix * subMat, BaseMatrix * subMatAu
 #pragma omp master
                 {
                     const bool keepIdentity = (par.includeIdentity || sameDB);
+                    const int curQueryLen = qSeq.L;
                     size_t kept = 0;
                     for (size_t i = 0; i < shortResults.size(); i++) {
                         const bool isIdentity = (queryKey == shortResults[i].seqId) && keepIdentity;
-                        if (isIdentity || shortResults[i].prefScore > par.minDiagScoreThr) {
+                        bool keepScore = (shortResults[i].prefScore > par.minDiagScoreThr);
+                        bool keepPvalue = true;
+                        if (alignmentMode == 0 && evaluerUngapped != NULL && par.ungappedPvalThr < 1.0 && keepScore && !isIdentity) {
+                            // tSeq on master is stale (last rescored target), so
+                            // re-look-up the per-hit target length read-only.
+                            const size_t hitTId = tdbr->getId(shortResults[i].seqId);
+                            const size_t hitTLen = (hitTId == DB_ENTRY_NOT_FOUND)
+                                    ? static_cast<size_t>(curQueryLen)
+                                    : tdbr->getSeqLen(hitTId);
+                            if (haveQueryCalib[id]) {
+                                keepPvalue = (EvalueComputation::computeProfilePvalue(
+                                        shortResults[i].prefScore, curQueryLen, (int)hitTLen,
+                                        queryCalibs[id].lambda, queryCalibs[id].K) <= par.ungappedPvalThr);
+                            } else {
+                                // The aux channel (and thus this combined-score
+                                // truncation) is only enabled for non-profile
+                                // queries (see useAux above), so the sequence
+                                // BLOSUM path is the correct fallback here.
+                                keepPvalue = (evaluerUngapped->computePvalue(
+                                        shortResults[i].prefScore, curQueryLen, hitTLen) <= par.ungappedPvalThr);
+                            }
+                        }
+                        if (isIdentity || (keepScore && keepPvalue)) {
                             shortResults[kept++] = shortResults[i];
                         }
                     }
@@ -616,11 +796,21 @@ void runFilterOnCpu(Parameters & par, BaseMatrix * subMat, BaseMatrix * subMatAu
 #pragma omp barrier
         }
     }
+    if (calibCacheDirty && par.ungappedCalibPath.empty() == false) {
+        if (ProfileCalibrator::saveCache(par.ungappedCalibPath, calibCache) == false) {
+            Debug(Debug::WARNING) << "Could not write profile calibration cache to "
+                                  << par.ungappedCalibPath << "\n";
+        }
+    }
 }
 
 int prefilterInternal(int argc, const char **argv, const Command &command, int mode) {
     Parameters &par = Parameters::getInstance();
     par.parseParameters(argc, argv, command, true, 0, 0);
+    if (par.prefMode == Parameters::PREF_MODE_UNGAPPED_AND_GAPPED) {
+        Debug(Debug::ERROR) << "--prefilter-mode 3 (UNGAPPED_AND_GAPPED) is disabled (SW kernels are not bias-corrected); use --prefilter-mode 1 (ungapped) or 0 (k-mer)\n";
+        EXIT(EXIT_FAILURE);
+    }
     int outputDbtype = (par.prefMode == Parameters::PREF_MODE_UNGAPPED_AND_GAPPED)
                       ? Parameters::DBTYPE_ALIGNMENT_RES : Parameters::DBTYPE_PREFILTER_RES;
     DBWriter resultWriter(par.db3.c_str(), par.db3Index.c_str(), 1, par.compressed, outputDbtype);
@@ -663,6 +853,7 @@ int prefilterInternal(int argc, const char **argv, const Command &command, int m
     }
     BaseMatrix *subMat;
     EvalueComputation * evaluer;
+    EvalueComputation * evaluerUngapped = NULL;
     int8_t * tinySubMat;
     if (Parameters::isEqualDbtype(querySeqType, Parameters::DBTYPE_NUCLEOTIDES)) {
         subMat = new NucleotideMatrix(par.scoringMatrixFile.values.nucleotide().c_str(), 1.0, 0.0);
@@ -713,17 +904,21 @@ int prefilterInternal(int argc, const char **argv, const Command &command, int m
     if(par.PARAM_TAXON_LIST.wasSet){
         taxonomyHook = new QueryMatcherTaxonomyHook(par.db2, tdbr, par.taxonList, par.threads);
     }
+    // Gapless statistics for the per-pair ungapped p-value filter (--ungapped-pvalue).
+    // Uses the primary substitution matrix; dbResCount is unused by the
+    // per-pair calc() path but kept consistent with the gapped instance.
+    evaluerUngapped = new EvalueComputation(tdbr->getAminoAcidDBSize(), subMat);
     if(par.gpu){
 #ifdef HAVE_CUDA
         runFilterOnGpu(par, subMat, qdbr, tdbr, sameDB,
-                       resultWriter, evaluer, taxonomyHook);
+                       resultWriter, evaluer, evaluerUngapped, taxonomyHook);
 #else
         Debug(Debug::ERROR) << "MMseqs2 was compiled without CUDA support\n";
         EXIT(EXIT_FAILURE);
 #endif
     }else{
         runFilterOnCpu(par, subMat, subMatAux, tinySubMat, qdbr, tdbr, sequenceLookup, sameDB,
-                   resultWriter, evaluer, taxonomyHook,  mode);
+                   resultWriter, evaluer, evaluerUngapped, taxonomyHook,  mode);
     }
 
     resultWriter.close();
@@ -746,6 +941,9 @@ int prefilterInternal(int argc, const char **argv, const Command &command, int m
         delete subMatAux;
     }
     delete evaluer;
+    if (evaluerUngapped != NULL) {
+        delete evaluerUngapped;
+    }
 
     return 0;
 }

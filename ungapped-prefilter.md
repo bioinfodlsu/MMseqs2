@@ -1,0 +1,97 @@
+# Ungapped p-value prefilter
+
+> **AI-generated.** This document was written by AI tools. The feature it
+> describes has been manually reviewed and tested. **Status: experimental.**
+
+## Known limitations
+
+1. **GPU gates after top-K truncation.** Marv returns only the best `--max-seqs`
+   hits by score and the gate runs on those, while the CPU path gates all pairs
+   before truncation. Since `p` is not monotonic in score across targets of
+   different length, a bounded `--max-seqs` can make GPU and CPU diverge (dormant
+   at the default `2147483647`).
+2. **Saturating byte arithmetic can reduce sensitivity.** The Blackwell UInt8x4
+   GPU kernel and the CPU byte kernel accumulate offset-shifted scores in
+   unsigned bytes with saturating adds. The offset cancels exactly only while no
+   intermediate sum exceeds `255 - bias` (`bias = |min|` PSSM entry, `~4-8` for
+   normal profiles), so very high-scoring ungapped alignments can be
+   under-reported on both CPU and GPU. With `--ungapped-pvalue` this can raise a
+   candidate's p-value enough to reject it, and it can change GPU top-K
+   selection, so CPU and GPU may diverge on such hits. Most likely with
+   tiny-alphabet or repeat-rich queries. Standard builds select UInt8x4 only for
+   Blackwell (CC 12+) when `CUDASW_INT8_GAPLESS` is enabled (CUDA >= 13.2);
+   Turing and Ampere use wider accumulators and are unaffected. This is a
+   possible prefilter sensitivity loss that downstream alignment cannot recover.
+3. **No finite-size correction for profiles.** The profile path uses the
+   asymptotic `K*m*n*exp(-lambda*S)`; the sequence path uses the
+   finite-size-corrected `area(m,n)`. The two differ for short sequences.
+4. **Cache key identity.** The key is the profile hash plus length only; it does
+   not encode the substitution matrix or background, so a cache generated with
+   different settings can be reused incorrectly.
+
+## Testing other GPU kernel families
+
+A binary can be built to select another architecture's gapless config set on the
+current device (test-only compile definitions; requires `-DENABLE_CUDA=1`, and
+`-DCMAKE_CUDA_COMPILER=/path/to/nvcc` only if `nvcc` is not in `PATH`):
+
+    cmake -S . -B build-turing  -DCMAKE_BUILD_TYPE=Release -DENABLE_CUDA=1 \
+          -DCMAKE_CUDA_ARCHITECTURES=120-real -DMARV_FORCE_GAPLESS_CC_MAJOR=75
+    cmake -S . -B build-ampere  -DCMAKE_BUILD_TYPE=Release -DENABLE_CUDA=1 \
+          -DCMAKE_CUDA_ARCHITECTURES=120-real -DMARV_FORCE_GAPLESS_CC_MAJOR=80
+    cmake -S . -B build-stress  -DCMAKE_BUILD_TYPE=Release -DENABLE_CUDA=1 \
+          -DCMAKE_CUDA_ARCHITECTURES=120-real \
+          -DMARV_FORCE_GAPLESS_CC_MAJOR=80 -DMARV_FORCE_INT8=1
+    for b in build-turing build-ampere build-stress; do cmake --build "$b" --target mmseqs -j; done
+    MMSEQS_BIN=build-cuda/src/mmseqs \
+    MMSEQS_FORCED_BINS="turing:build-turing/src/mmseqs ampere:build-ampere/src/mmseqs stress:build-stress/src/mmseqs" \
+        sh src/test/TestTinyProfileGpuFilter.sh
+
+`MARV_FORCE_GAPLESS_CC_MINOR` defaults to 0; `MARV_FORCE_INT8` (0/1) overrides
+the int8 decision independently of the arch. These compile the same kernel
+source for the native arch with another arch's tile parameters, so they validate
+the config/datatype/bias-shift path and CPU parity, not arch-specific codegen.
+
+## Vendored NCBI Karlin statistics
+
+The per-profile `(lambda, K, H)` fit is not reimplemented. `lib/ncbi-blast`
+vendors the required functions from the NCBI C++ toolkit under their original
+filenames:
+
+* `blast_stat.c` — `BlastScoreChk`, `Blast_ScoreFreqNew/Free`,
+  `BlastKarlinLHtoK`, `NlmKarlinLambdaNR`, `Blast_KarlinLambdaNR`,
+  `BlastKarlinLtoH`, `Blast_KarlinBlkUngappedCalc`, and the
+  `BLAST_KARLIN_*_DEFAULT` constants.
+* `ncbi_math.c` — `BLAST_Gcd`, `BLAST_Powi`, `BLAST_Expm1`.
+* `blast_stat.h` — `Blast_ScoreFreq`, `Blast_KarlinBlk`, score bounds and the
+  prototypes.
+* `ncbi_std.h` — a minimal stand-in for the upstream toolkit headers (`Int4`,
+  `Int2`, `ABS`, ...).
+
+Function bodies are verbatim. The adapter `src/alignment/NcbiKarlin.{h,cpp}`
+maps a one-column score distribution onto `Blast_ScoreFreq`, calls
+`Blast_KarlinBlkUngappedCalc` and validates `lambda`/`K`/`H` strictly;
+`src/alignment/ProfileCalibrator.{h,cpp}` builds the distribution from the
+production `int8` scores and caches the result. One change is applied to the
+vendored code, marked `MMSEQS PATCH` in `BlastKarlinLHtoK` (upstream indexes the
+unscaled probability array with scaled offsets when the score divisor is `> 1`);
+provenance, the exact hunk and the re-sync procedure are in
+`lib/ncbi-blast/README.md`.
+
+## Test design
+
+* **Unit (always built):** `TestProfileCalib` — analytic fit vs BLOSUM62
+  gapless `lambda=0.3207`/`K=0.139`, p agreement, null uniformity, profile vs
+  sequence representation, cache round-trip, poly-W, degenerate fail-open,
+  zero-length guard, lattice `divisor>1`.
+* **Fixtures** (`src/test/`, generated by `gen_tiny_profile_fixtures.py`, fixed
+  seeds; `--check` byte-compares regenerated output): `tiny_mix.sto`,
+  `tiny_polyW.sto`, `tiny_target.fasta` (18 random targets, plus `spike_exact`
+  and near-threshold `spike_mut70`).
+* **`TestTinyProfileCpuFilter.sh`:** golden hit set + scores at `p=0.05`,
+  score-preserving superset at `p=1.0`, CPU determinism (run == recalibrate),
+  cache header/rows, poly-W calibrates, mode 3 hard-errors.
+* **`TestTinyProfileGpuFilter.sh`:** GPU output (hit set + scores) must equal the
+  CPU prefilter for native and forced-arch/stress builds, both gated (`p=0.05`)
+  and gate-off (`p=1.0`), plus determinism. Rare under-reporting from
+  saturating byte arithmetic (limitation 2) would appear as a strict mismatch.

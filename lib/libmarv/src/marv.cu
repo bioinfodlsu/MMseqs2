@@ -83,6 +83,15 @@ Marv::Marv(size_t dbEntries, int alphabetSize, int maxSeqLength, size_t maxSeqs,
         cudaDeviceGetAttribute(&ccMajor, cudaDevAttrComputeCapabilityMajor, devId); CUERR
         if (ccMajor < 12) { allBlackwell = false; break; }
     }
+#ifdef MARV_FORCE_GAPLESS_CC_MAJOR
+    // Test-only: derive int8 eligibility from the forced architecture, so a
+    // forced legacy config set is not filtered through the int8 supported list.
+    allBlackwell = (MARV_FORCE_GAPLESS_CC_MAJOR >= 12);
+#endif
+#ifdef MARV_FORCE_INT8
+    // Test-only: force int8 on/off independently of the architecture.
+    allBlackwell = (MARV_FORCE_INT8 != 0);
+#endif
     if (allBlackwell) {
         sw->allowInt8(true);
     }

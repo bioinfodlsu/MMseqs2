@@ -48,6 +48,12 @@ INPUT="$1"
 TARGET="$2"
 TMP_PATH="$4"
 
+# --prefilter-mode 3 is disabled (SW kernels are not bias-corrected)
+if [ "$PREFMODE" = "UNGAPPED_AND_GAPPED" ]; then
+    echo "Error: --prefilter-mode 3 is disabled (SW kernels are not bias-corrected), use --prefilter-mode 1" 1>&2
+    exit 1
+fi
+
 STEP=0
 STEPS="${STEPS:-1}"
 ALN_RES_MERGE="$TMP_PATH/aln_0"

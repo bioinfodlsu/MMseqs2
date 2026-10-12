@@ -6,6 +6,8 @@ set(alignment_header_files
         alignment/MsaFilter.h
         alignment/MultipleAlignment.h
         alignment/PSSMCalculator.h
+        alignment/ProfileCalibrator.h
+        alignment/NcbiKarlin.h
         alignment/StripedSmithWaterman.h
         alignment/BandedNucleotideAligner.h
         alignment/BlockAligner.h
@@ -23,6 +25,8 @@ set(alignment_source_files
         alignment/MsaFilter.cpp
         alignment/MultipleAlignment.cpp
         alignment/PSSMCalculator.cpp
+        alignment/ProfileCalibrator.cpp
+        alignment/NcbiKarlin.cpp
         alignment/StripedSmithWaterman.cpp
         alignment/BandedNucleotideAligner.cpp
         alignment/BlockAligner.cpp

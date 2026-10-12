@@ -319,19 +319,10 @@ int search(int argc, const char **argv, const Command& command) {
         cmd.addVariable("ALIGN_MODULE", "align");
     }
 
-    // GPU can only use the ungapped prefilter
+    // GPU can only use the ungapped prefilter. --prefilter-mode 3 is disabled
+    // (SW kernels are not bias-corrected); auto-select gapless-only (1).
     if (par.gpu == 1 && par.PARAM_PREF_MODE.wasSet == false) {
-        if (par.numIterations > 1
-            || par.alignmentMode != Parameters::ALIGNMENT_MODE_SCORE_ONLY
-            || par.altAlignment > 0
-            || par.scoreBias != 0.0
-            || par.realign == true
-            || par.addBacktrace == true
-            ) {
-            par.prefMode = Parameters::PREF_MODE_UNGAPPED;
-        } else {
-            par.prefMode = Parameters::PREF_MODE_UNGAPPED_AND_GAPPED;
-        }
+        par.prefMode = Parameters::PREF_MODE_UNGAPPED;
     }
 
     switch(par.prefMode){
@@ -342,7 +333,8 @@ int search(int argc, const char **argv, const Command& command) {
             cmd.addVariable("PREFMODE", "UNGAPPED");
             break;
         case Parameters::PREF_MODE_UNGAPPED_AND_GAPPED:
-            cmd.addVariable("PREFMODE", "UNGAPPED_AND_GAPPED");
+            Debug(Debug::ERROR) << "--prefilter-mode 3 (UNGAPPED_AND_GAPPED) is disabled (SW kernels are not bias-corrected); use --prefilter-mode 1 (ungapped) or 0 (k-mer)\n";
+            EXIT(EXIT_FAILURE);
             break;
         case Parameters::PREF_MODE_EXHAUSTIVE:
             cmd.addVariable("PREFMODE", "EXHAUSTIVE");
